@@ -49,7 +49,7 @@ resource "aws_ecs_task_definition" "harsh_task_definition" {
   container_definitions = <<TASKDEFINITION
     [
       {
-        "name": "harsh-repo",
+        "name": "harsh-container",
         "image": "${aws_ecr_repository.harsh_ecr_repo.repository_url}",
         "portMappings": [
           {
@@ -97,11 +97,11 @@ resource "aws_route_table" "harsh_route_table" {
 }
 
 # Create a route for internet access via the internet gateway
-# resource "aws_route" "internet_access" {
-#   route_table_id            = aws_route_table.harsh_route_table.id
-#   destination_cidr_block    = "0.0.0.0/0"
-#   gateway_id                = aws_internet_gateway.my_igw.id
-# }
+resource "aws_route" "internet_access" {
+  route_table_id            = aws_route_table.harsh_route_table.id
+  destination_cidr_block    = "0.0.0.0/0"
+  gateway_id                = aws_internet_gateway.my_igw.id
+}
 
 # Associate the first subnet with the route table
 resource "aws_route_table_association" "harsh_route1" {
@@ -115,7 +115,7 @@ resource "aws_route_table_association" "harsh_route2" {
   route_table_id = aws_route_table.harsh_route_table.id
 }
 
-resource "aws_security_group" "load_balancer_security_group" {
+resource "aws_security_group" "harsh_security_group" {
   vpc_id = aws_vpc.harsh.id
   ingress {
     from_port   = 80
@@ -132,14 +132,14 @@ resource "aws_security_group" "load_balancer_security_group" {
   }
 }
 
-resource "aws_security_group" "service_security_group" {
+resource "aws_security_group" "harsh1_security_group" {
   vpc_id = aws_vpc.harsh.id
   ingress {
     from_port = 0
     to_port   = 0
     protocol  = "-1"
-    # Only allowing traffic in from the load balancer security group
-    security_groups = ["${aws_security_group.load_balancer_security_group.id}"]
+    # it will allow traffic from lb security group
+    security_groups = ["${aws_security_group.harsh_security_group.id}"]
   }
 
   egress {
@@ -151,11 +151,11 @@ resource "aws_security_group" "service_security_group" {
 }
 
 
-resource "aws_alb" "application_load_balancer" {
+resource "aws_alb" "harsh_load_balancer" {
   name               = "harsh-load-balancer"
   load_balancer_type = "application"
   subnets = [ "${aws_subnet.harsh_subnet1.id}","${aws_subnet.harsh_subnet2.id}"]
-  security_groups = ["${aws_security_group.load_balancer_security_group.id}"]
+  security_groups = ["${aws_security_group.harsh_security_group.id}"]
 }
 
 
@@ -168,7 +168,7 @@ resource "aws_lb_target_group" "target_group" {
 }
 
 resource "aws_lb_listener" "listener" {
-  load_balancer_arn = "${aws_alb.application_load_balancer.arn}" #  load balancer
+  load_balancer_arn = "${aws_alb.harsh_load_balancer.arn}" #  load balancer
   port              = "80"
   protocol          = "HTTP"
   default_action {
@@ -185,13 +185,36 @@ resource "aws_ecs_service" "my_service" {
   launch_type = "FARGATE"
   desired_count   = 2
   load_balancer {
-    target_group_arn = "${aws_lb_target_group.target_group.arn}" # Reference the target group
-    container_name   = "harsh-repo"
-    container_port   = 8000 # Specify the container port
+    target_group_arn = "${aws_lb_target_group.target_group.arn}" 
+    container_name   = "harsh-container"
+    container_port   = 8000 
   }
    network_configuration {
     subnets          = ["${aws_subnet.harsh_subnet1.id}", "${aws_subnet.harsh_subnet2.id}"]
-    assign_public_ip = true     # Provide the containers with public IPs
-    security_groups  = ["${aws_security_group.service_security_group.id}"] # Set up the security group
+    assign_public_ip = true     
+    security_groups  = ["${aws_security_group.harsh1_security_group.id}"] 
+  }
+}
+
+resource "aws_appautoscaling_target" "harsh_scaling_target" {
+  max_capacity       = 10
+  min_capacity       = 2
+  resource_id        = "service/${aws_ecs_cluster.ecs_cluster.name}/${aws_ecs_service.my_service.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "harsh_scaling_policy" {
+  name               = "harsh-scaling-policy"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.harsh_scaling_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.harsh_scaling_target.scalable_dimension
+  service_namespace = aws_appautoscaling_target.harsh_scaling_target.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+    target_value = 70
   }
 }
